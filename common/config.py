@@ -18,13 +18,14 @@ class DatabaseConfig:
 
 
 @dataclass
-class AppConfig:
+class TaskConfig:
     QPS: int = int(os.getenv("QPS", 100))
     FAIL_RATE: float = float(os.getenv("FAIL_RATE", 0.2))
     MAX_RETRY: int = int(os.getenv("MAX_RETRY", 3))
     TIMEOUT_THRESHOLD: int = int(os.getenv("TIMEOUT_THRESHOLD", 30))
     MAX_TIME: int = int(os.getenv("MAX_TIME", 40))
     MIN_TIME: int = int(os.getenv("MIN_TIME", 5))
+    SERVICE_ROLE: str | None = os.getenv("SERVICE_ROLE")
 
 
 @dataclass
@@ -70,7 +71,7 @@ class LogConfig:
 
 # 导出便捷的配置对象（推荐）
 db_config = DatabaseConfig()
-app_config = AppConfig()
+task_config = TaskConfig()
 kafka_config = KafkaConfig()
 redis_config = RedisConfig()
 celery_config = CeleryConfig()

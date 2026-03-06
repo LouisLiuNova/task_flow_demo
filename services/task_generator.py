@@ -9,18 +9,18 @@ from collections.abc import Iterator
 from confluent_kafka import Producer
 
 from common import logger
-from common.config import app_config, kafka_config
+from common.config import kafka_config, task_config
 from common.models.enums import TaskType
 from common.models.task import Task
-from common.services.registry import ServiceManager
+from services.registry import ServiceManager
 
 
 def generate_task() -> Task:
     """
     Generate a task randomly with configured QPS and loss rate
     """
-    if_success = random.random() > app_config.FAIL_RATE
-    execution_time = random.randint(app_config.MIN_TIME, app_config.MAX_TIME)
+    if_success = random.random() > task_config.FAIL_RATE
+    execution_time = random.randint(task_config.MIN_TIME, task_config.MAX_TIME)
     return Task(
         task_type=random.choice(list(TaskType)),
         if_success=if_success,
@@ -39,7 +39,7 @@ def produce_tasks() -> Iterator[Task]:
     next_emit_time = time.perf_counter()
     while True:
         try:
-            qps = app_config.QPS
+            qps = task_config.QPS
             if qps <= 0:
                 time.sleep(0.1)
                 next_emit_time = time.perf_counter()

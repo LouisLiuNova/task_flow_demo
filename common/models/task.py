@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from common.config import app_config
+from common.config import task_config
 from common.models.enums import TaskStatus, TaskType
 
 
@@ -23,5 +23,5 @@ class Task(BaseModel):
     )
     execution_time: int = Field(
         description="The execution time of the task in seconds",
-        default_factory=lambda: randint(app_config.MIN_TIME, app_config.MAX_TIME),
+        default_factory=lambda: randint(task_config.MIN_TIME, task_config.MAX_TIME),
     )

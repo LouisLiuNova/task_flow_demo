@@ -11,7 +11,7 @@ from celery import Celery
 from kombu import Queue
 
 from common import logger
-from common.config import app_config, celery_config
+from common.config import celery_config, task_config
 from common.models.enums import TaskType
 from common.models.task import Task
 from services.registry import ServiceManager
@@ -51,7 +51,7 @@ def _build_celery_app(queue_name: str) -> Celery:
     logger.info(
         "celery worker bound to queue: {}, timeout_threshold: {}s",
         queue_name,
-        app_config.TIMEOUT_THRESHOLD,
+        task_config.TIMEOUT_THRESHOLD,
     )
     return app
 
@@ -69,7 +69,7 @@ def _simulate_execution(task: Task) -> dict[str, Any]:
     """
     模拟任务执行，并根据配置判断成功或失败。
     """
-    timeout_threshold = app_config.TIMEOUT_THRESHOLD
+    timeout_threshold = task_config.TIMEOUT_THRESHOLD
     execution_time = task.execution_time
     logger.info(
         "task received id={}, type={}, if_success={}, execution_time={}s",
