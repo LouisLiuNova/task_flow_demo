@@ -6,9 +6,13 @@ import random
 import time
 from collections.abc import Iterator
 
-from common.config import app_config
+from confluent_kafka import Producer
+
+from common import logger
+from common.config import app_config, kafka_config
 from common.models.enums import TaskType
 from common.models.task import Task
+from common.services.registry import ServiceManager
 
 
 def generate_task() -> Task:
@@ -55,3 +59,22 @@ def produce_tasks() -> Iterator[Task]:
             next_emit_time += interval
         except KeyboardInterrupt:
             break
+
+
+@ServiceManager.register_service(service_name="task_gen_and_push")
+def publish_tasks_to_kafka(
+    producer: Producer | None = None,
+    topic: str | None = None,
+) -> None:
+    kafka_producer = producer or Producer(
+        {"bootstrap.servers": kafka_config.BOOTSTRAP_SERVERS}
+    )
+    target_topic = topic or kafka_config.TASK_TOPIC
+    logger.info("start publish tasks to kafka topic: {}", target_topic)
+    try:
+        for task in produce_tasks():
+            payload = task.model_dump_json().encode("utf-8")
+            kafka_producer.produce(target_topic, payload)
+            kafka_producer.poll(0)
+    finally:
+        kafka_producer.flush()

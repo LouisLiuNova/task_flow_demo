@@ -36,6 +36,25 @@ class KafkaConfig:
 
 
 @dataclass
+class RedisConfig:
+    URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    RESULT_CHANNEL: str = os.getenv("REDIS_RESULT_CHANNEL", "task_result_channel")
+
+
+@dataclass
+class CeleryConfig:
+    BROKER_URL: str = os.getenv(
+        "CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    )
+    BACKEND_URL: str = os.getenv(
+        "CELERY_BACKEND_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    )
+    QUEUE: str | None = os.getenv("CELERY_QUEUE")
+    DEFAULT_QUEUE: str | None = os.getenv("CELERY_DEFAULT_QUEUE")
+    WORKER_TASK_TYPE: str | None = os.getenv("CELERY_WORKER_TASK_TYPE")
+
+
+@dataclass
 class LogConfig:
     LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     FORMAT: str = os.getenv(
@@ -53,4 +72,6 @@ class LogConfig:
 db_config = DatabaseConfig()
 app_config = AppConfig()
 kafka_config = KafkaConfig()
+redis_config = RedisConfig()
+celery_config = CeleryConfig()
 log_config = LogConfig()
