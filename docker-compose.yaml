@@ -1,33 +1,73 @@
+x-app-base: &app-base
+  build: .
+  env_file:
+    - .env
+  restart: unless-stopped
+  depends_on:
+    - kafka
+    - redis
+
 services:
-  task_generator:
-    build: .
-    container_name: task_generator
-    ports:
-      - 8000:8000
-    environment:
-      - QPS=100
-      - FAIL_RATE=0.2
-      - TIMEOUT_THRESHOLD=30
-      - MAX_TIME=40
-      - MIN_TIME=5
   kafka:
     image: apache/kafka:3.7.0
-    container_name: kafka
     ports:
       - 9092:9092
     environment:
-      - CLUSTER_ID=Aa7WsHoYQS27SnBQNSMuZg
-      - KAFKA_PROCESS_ROLES=broker,controller
-      - KAFKA_NODE_ID=1
-      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
-      - KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092
-      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
-      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      CLUSTER_ID: Aa7WsHoYQS27SnBQNSMuZg
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/tmp/kraft-combined-logs
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - 6379:6379
+
+  task_gen_and_push:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_gen_and_push
+
+  task_router:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_router
+
+  task_result_proxy:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_result_proxy
+
+  task_result_viewer:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_result_viewer
+
+  task_worker_query:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_worker
+      CELERY_WORKER_TASK_TYPE: query
+
+  task_worker_write:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_worker
+      CELERY_WORKER_TASK_TYPE: write
+
+  task_worker_delete:
+    <<: *app-base
+    environment:
+      SERVICE_ROLE: task_worker
+      CELERY_WORKER_TASK_TYPE: delete
 
 volumes:
   kafka_data:

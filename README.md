@@ -1,73 +1,78 @@
 # task_flow_demo
 A poc of a task distribution and execution framework. Using Kafka, FastAPI and Celery+Redis
 ```mermaid
-flowchart TD
-    %% 配置&监控层
-    A[FastAPI配置&监控接口<br/>- QPS动态配置<br/>- 状态查询<br/>- 发布源启停]
+flowchart LR
+    subgraph Runtime["容器运行层"]
+        GEN["task_gen_and_push"]
+        ROUTER["task_router"]
+        WQ["task_worker_query"]
+        WW["task_worker_write"]
+        WD["task_worker_delete"]
+        RP["task_result_proxy"]
+        RV["task_result_viewer"]
+    end
 
-    %% Mock任务发布层
-    B[Mock任务发布源<br/>（可配置QPS 1~1000）<br/>- 生成Mock任务<br/>- 控制发布速率]
-    A -.->|动态配置QPS/启停| B
+    subgraph Infra["基础设施层"]
+        KIN["Kafka: task_input"]
+        KOUT["Kafka: task_result"]
+        REDIS["Redis"]
+        CEVT["Celery Events"]
+    end
 
-    %% 接入&分流层
-    C[接入层<br/>- 参数校验<br/>- 过滤无效任务]
-    D[分流层<br/>- 初始化任务状态<br/>- 按类型路由队列]
-    B -->|推送Mock任务| C
-    C -->|提交合法任务| D
+    GEN -->|生产任务| KIN
+    KIN -->|消费| ROUTER
+    
+    ROUTER -->|query队列| REDIS
+    ROUTER -->|write队列| REDIS
+    ROUTER -->|delete队列| REDIS
 
-    %% 存储层（基础依赖）
-    E[SQLite存储<br/>- task_status：任务状态<br/>- task_result：执行结果]
-    F[Redis<br/>- Celery消息代理<br/>- Pub/Sub结果管道<br/>- 临时缓存]
-    D -->|写入pending状态| E
+    REDIS -->|处理| WQ
+    REDIS -->|处理| WW
+    REDIS -->|处理| WD
 
-    %% 调度队列层
-    G1[flow_query_queue]
-    G2[log_analysis_queue]
-    G3[data_backtrack_queue]
-    D -->|flow_query类型| G1
-    D -->|log_analysis类型| G2
-    D -->|data_backtrack类型| G3
-    G1 -.->|任务存储| F
-    G2 -.->|任务存储| F
-    G3 -.->|任务存储| F
+    WQ -->|事件| CEVT
+    WW -->|事件| CEVT
+    WD -->|事件| CEVT
 
-    %% 执行层
-    H1[Celery Worker 1<br/>- 绑定flow_query_queue<br/>- 执行流量查询任务]
-    H2[Celery Worker 2<br/>- 绑定log_analysis_queue<br/>- 执行日志分析任务]
-    H3[Celery Worker 3<br/>- 绑定data_backtrack_queue<br/>- 执行数据回溯任务]
-    G1 -->|消费任务| H1
-    G2 -->|消费任务| H2
-    G3 -->|消费任务| H3
-
-    %% 数据基座Mock
-    I[数据基座Mock<br/>- 模拟查询耗时<br/>- 1%概率失败<br/>- 返回模拟结果]
-    H1 -->|调用查询| I
-    H2 -->|调用查询| I
-    H3 -->|调用查询| I
-
-    %% 结果处理&存储
-    H1 -->|写入执行结果| E
-    H2 -->|写入执行结果| E
-    H3 -->|写入执行结果| E
-    H1 -->|更新任务状态:成功或失败| E
-    H2 -->|更新任务状态:成功或失败| E
-    H3 -->|更新任务状态:成功或失败| E
-
-    %% 结果通知层
-    J[Redis Pub/Sub<br/>- 结果通知频道：task_result_channel]
-    H1 -->|发布成功/失败结果| J
-    H2 -->|发布成功/失败结果| J
-    H3 -->|发布成功/失败结果| J
-    J -.->|消息存储| F
-
-    %% 下游消费层
-    K[结果消费端<br/>- 订阅结果频道<br/>- 模拟下游系统<br/>- 打印结果/错误]
-    J -->|推送结果通知| K
-
-    %% 标注核心链路
-    note1[核心链路：Mock发布 → 接入校验 → 分流路由 → 队列调度 → 执行器处理 → 存储 → 结果通知]
+    CEVT -->|捕获| RP
+    RP -->|发布结果| KOUT
+    KOUT -->|展示| RV
 ```
+简化时序图
+```mermaid
+sequenceDiagram
+    participant GEN as task_gen_and_push
+    participant KIN as Kafka: task_input
+    participant ROUTER as task_router
+    participant REDIS as Redis
+    participant WQ as task_worker_query
+    participant WW as task_worker_write
+    participant WD as task_worker_delete
+    participant CEVT as Celery Events
+    participant RP as task_result_proxy
+    participant KOUT as Kafka: task_result
+    participant RV as task_result_viewer
 
+    %% 核心流程：任务生成 → 路由 → Worker处理 → 结果推送 → 结果展示
+    GEN->>KIN: 生产任务JSON
+    ROUTER->>KIN: 消费任务JSON
+    ROUTER->>REDIS: 发送query队列任务
+    ROUTER->>REDIS: 发送write队列任务
+    ROUTER->>REDIS: 发送delete队列任务
+    
+    REDIS->>WQ: 推送query队列任务
+    REDIS->>WW: 推送write队列任务
+    REDIS->>WD: 推送delete队列任务
+    
+    WQ->>CEVT: 触发任务事件
+    WW->>CEVT: 触发任务事件
+    WD->>CEVT: 触发任务事件
+    
+    RP->>CEVT: 捕获任务事件
+    RP->>KOUT: 发布结果数据
+    RV->>KOUT: 消费并展示结果
+```
+分层时序图
 ```mermaid
 sequenceDiagram
     participant Mocker as Mock任务发布源<br/>(可配置QPS)
