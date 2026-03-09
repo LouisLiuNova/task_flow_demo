@@ -1,8 +1,16 @@
 # task_flow_demo
-A poc of a task distribution and execution framework. Using Kafka, FastAPI and Celery+Redis
+
+一个基于 Kafka + Celery + Redis 的任务流转演示项目。
+
+当前仓库实现的是容器化的“任务生成 → 路由 → Worker 执行 → 结果回传 → 结果展示”闭环，不包含 FastAPI 接口与 SQLite 状态库。
+
+未实现能力和后续计划已迁移到 [ROADMAP.md](./ROADMAP.md)。
+
+## 当前实现架构
+
 ```mermaid
 flowchart LR
-    subgraph Runtime["容器运行层"]
+    subgraph Runtime["运行容器"]
         GEN["task_gen_and_push"]
         ROUTER["task_router"]
         WQ["task_worker_query"]
@@ -12,221 +20,229 @@ flowchart LR
         RV["task_result_viewer"]
     end
 
-    subgraph Infra["基础设施层"]
+    subgraph Infra["基础设施"]
         KIN["Kafka: task_input"]
         KOUT["Kafka: task_result"]
         REDIS["Redis"]
-        CEVT["Celery Events"]
+        CEVT["Celery Events/Backend"]
     end
 
     GEN -->|生产任务| KIN
-    KIN -->|消费| ROUTER
-    
-    ROUTER -->|query队列| REDIS
-    ROUTER -->|write队列| REDIS
-    ROUTER -->|delete队列| REDIS
-
-    REDIS -->|处理| WQ
-    REDIS -->|处理| WW
-    REDIS -->|处理| WD
-
-    WQ -->|事件| CEVT
-    WW -->|事件| CEVT
-    WD -->|事件| CEVT
-
-    CEVT -->|捕获| RP
+    ROUTER -->|消费任务| KIN
+    ROUTER -->|按类型投递| REDIS
+    REDIS -->|query_queue| WQ
+    REDIS -->|write_queue| WW
+    REDIS -->|delete_queue| WD
+    WQ -->|任务事件| CEVT
+    WW -->|任务事件| CEVT
+    WD -->|任务事件| CEVT
+    RP -->|监听 Celery 事件| CEVT
     RP -->|发布结果| KOUT
-    KOUT -->|展示| RV
-```
-简化时序图
-```mermaid
-sequenceDiagram
-    participant GEN as task_gen_and_push
-    participant KIN as Kafka: task_input
-    participant ROUTER as task_router
-    participant REDIS as Redis
-    participant WQ as task_worker_query
-    participant WW as task_worker_write
-    participant WD as task_worker_delete
-    participant CEVT as Celery Events
-    participant RP as task_result_proxy
-    participant KOUT as Kafka: task_result
-    participant RV as task_result_viewer
-
-    %% 核心流程：任务生成 → 路由 → Worker处理 → 结果推送 → 结果展示
-    GEN->>KIN: 生产任务JSON
-    ROUTER->>KIN: 消费任务JSON
-    ROUTER->>REDIS: 发送query队列任务
-    ROUTER->>REDIS: 发送write队列任务
-    ROUTER->>REDIS: 发送delete队列任务
-    
-    REDIS->>WQ: 推送query队列任务
-    REDIS->>WW: 推送write队列任务
-    REDIS->>WD: 推送delete队列任务
-    
-    WQ->>CEVT: 触发任务事件
-    WW->>CEVT: 触发任务事件
-    WD->>CEVT: 触发任务事件
-    
-    RP->>CEVT: 捕获任务事件
-    RP->>KOUT: 发布结果数据
-    RV->>KOUT: 消费并展示结果
-```
-分层时序图
-```mermaid
-sequenceDiagram
-    participant Mocker as Mock任务发布源<br/>(可配置QPS)
-    participant Access as 接入层<br/>(参数校验)
-    participant Route as 分流层<br/>(状态初始化+队列路由)
-    participant StatusDB as 任务状态库<br/>(SQLite)
-    participant CeleryQ as Celery队列<br/>(Redis)
-    participant Exec as Celery Worker/执行器<br/>(含任务重试)
-    participant DataMock as 数据基座Mock<br/>(模拟查询)
-    participant ResultDB as 执行结果库<br/>(SQLite)
-    participant RedisPub as Redis结果通知管道<br/>(Pub/Sub)
-    participant Consumer as 结果消费端<br/>(模拟下游)
-
-    Note over Mocker,Consumer: 离线任务Demo-正常执行主流程
-    Mocker->>Mocker: 1.按配置QPS生成Mock任务<br/>(uuid生成task_id，随机任务类型)
-    Mocker->>Access: 2.推送任务参数（模拟Kafka消息）
-    Access->>Access: 3.参数合法性校验（简化版：必传项检查）
-    Access->>Route: 4.提交合法任务至分流层
-    Route->>StatusDB: 5.写入任务初始状态<br/>(task_id+type+status=pending)
-    Route->>CeleryQ: 6.按任务类型路由至对应队列<br/>(flow_query/log_analysis/backtrack)
-    CeleryQ->>Exec: 7.执行器从绑定队列拉取任务
-    Exec->>DataMock: 8.调用模拟数据基座查询<br/>(随机耗时0.01~0.1s)
-    DataMock->>Exec: 9.返回模拟查询结果（正常场景）
-    Exec->>ResultDB: 10.写入执行结果<br/>(task_id+结果数据+执行耗时)
-    Exec->>StatusDB: 11.更新任务状态为success
-    Exec->>RedisPub: 12.发布成功结果通知<br/>(task_id+status+result+耗时)
-    RedisPub->>Consumer: 13.消费端订阅并接收成功通知
-    Consumer->>Consumer: 14.打印/处理结果（模拟下游业务）
-
-    Note over Exec,RedisPub: 离线任务Demo-失败重试异常流程
-    Exec->>DataMock: 8'.调用模拟数据基座查询<br/>(1%概率触发失败)
-    DataMock-->>Exec: 9'.抛出查询失败异常
-    Exec->>Exec: 10'.触发Celery重试<br/>(max_retries=2，重试间隔2s)
-    alt 重试2次后仍失败
-        Exec->>ResultDB: 11'.无结果写入（仅记录状态）
-        Exec->>StatusDB: 12'.更新任务状态为failed+错误信息
-        Exec->>RedisPub: 13'.发布失败结果通知<br/>(task_id+status+error_msg)
-        RedisPub->>Consumer: 14'.消费端接收并打印失败通知
-    else 重试后成功
-        Exec->>ResultDB: 10.写入执行结果
-        Exec->>StatusDB: 11.更新状态为success
-        Exec->>RedisPub: 12.发布成功通知
-    end
-
-    Note over Mocker,Access: 辅助流程-QPS动态配置
-    User->>Mocker: 调用FastAPI接口/config/qps
-    Mocker->>Mocker: 动态调整任务发布间隔<br/>(interval=1/QPS，控制发布速率)
+    RV -->|消费并打印| KOUT
 ```
 
-```mermaid
-sequenceDiagram
-    participant A as FastAPI(配置&监控)
-    participant B as Mock任务发布源
-    participant C as 接入层
-    participant D as 分流层
-    participant E as Celery(客户端+Redis队列)
-    participant F as Celery Worker集群(flow_worker1/2/3等)
-    participant G as 数据基座Mock
-    participant H as SQLite(状态/结果库)
-    participant I as Redis Pub/Sub
-    participant J as 结果消费端
+## 系统原理说明
 
-    %% 1. 配置层：动态管控Mock发布源
-    A->>B: 下发配置（如QPS=50）/启停指令
-    B->>A: 反馈配置生效状态
+系统采用事件驱动与异步解耦模型，将“任务生产、任务分发、任务执行、结果回传”拆分为独立职责：
 
-    %% 2. Mock发布源：生成任务并推送
-    B->>C: 推送Mock任务参数（task_id/task_type/业务参数）
-    note over B,C: 按QPS速率生成，含唯一task_id
+1. 任务生成阶段  
+   `task_gen_and_push` 按 `QPS` 生成随机任务（包含任务类型、执行时长、是否成功），写入 Kafka 输入主题 `task_input`。
+2. 路由分发阶段  
+   `task_router` 消费 `task_input`，校验任务结构后按 `task_type` 分发到 Celery 对应队列（`query_queue`/`write_queue`/`delete_queue`）。
+3. 执行阶段  
+   三个 `task_worker_*` 容器分别监听自己的队列并执行任务，执行结果由 Celery Backend 记录，执行事件通过 Celery Events 发出。
+4. 结果聚合阶段  
+   `task_result_proxy` 订阅 Celery 成功/失败事件，补齐任务结果信息并写回 Kafka 输出主题 `task_result`。
+5. 结果消费阶段  
+   `task_result_viewer` 消费 `task_result`，将结果以 JSON 行输出，便于下游系统接入或日志采集。
 
-    %% 3. 接入层：前置参数校验
-    C->>C: 校验参数（task_id/task_type非空）
-    note over C: 过滤无效任务，仅合法任务向下传递
-    C->>D: 提交合法Mock任务参数
+该模型的核心原理是：
 
-    %% 4. 分流层：业务核心（先标记pending→再推Celery）
-    D->>D: 业务参数二次校验（兜底）
-    D->>H: 写入任务状态：task_id+task_type+status=pending
-    note over D,H: 核心容错逻辑：先记账，后执行
-    D->>E: 推送任务（按task_type→指定队列，如flow_query_queue）
-    E->>D: 返回Celery任务ID（入队确认，非依赖此标记pending）
-    note over D,E: 即使入队失败，SQLite已有pending记录可重试
+- Kafka 负责跨服务消息解耦与削峰，降低生产端和消费端耦合。
+- Celery + Redis 负责任务执行调度与队列隔离，让不同任务类型可独立扩缩。
+- 结果回传链路独立于执行链路，失败与成功都可统一聚合和观察。
 
-    %% 5. Celery：技术层调度（缓冲+实例分配）
-    E->>E: 任务序列化存入Redis对应队列（缓冲削峰）
-    note over E: 队列内任务按FIFO存储，独立Key
-    E->>F: 按负载均衡（公平/轮询）分配给绑定队列的某Worker实例
-    note over E,F: Celery仅决定“同队列下的哪个Worker”，非队列品类
-    F->>E: 拉取任务并加消费锁（避免重复消费）
+## Docker 容器功能与原理
 
-    %% 6. Worker：任务执行+最终状态更新
-    F->>F: 反序列化任务，解析参数
-    F->>G: 调用数据基座Mock（随机耗时/1%失败概率）
-    alt 任务执行成功
-        G->>F: 返回模拟查询结果
-        F->>H: 写入执行结果（task_id+结果+耗时）
-        F->>H: 更新状态：pending→success
-    else 任务执行失败（未达重试次数）
-        G->>F: 抛出异常
-        F->>E: 任务推回原队列（重试，max_retries=2）
-        note over F,E: 等待2秒后重复“Celery分配→Worker执行”流程
-    else 任务执行失败（重试耗尽）
-        G->>F: 抛出异常
-        F->>H: 更新状态：pending→failed（记录错误信息）
-    end
+| 容器名 | 功能 | 工作原理 |
+| --- | --- | --- |
+| `kafka` | 输入/输出消息总线 | 使用 topic 存储任务与结果；生产者写入 `task_input`/`task_result`，消费者按消费组拉取，实现发布订阅与位点管理。 |
+| `redis` | Celery Broker 与 Backend | Broker 负责队列缓存和投递，Backend 保存任务执行结果，供结果代理服务回查。 |
+| `task_gen_and_push` | 持续生成任务并推送 Kafka | 按 `QPS` 控制发送节奏，按 `FAIL_RATE` 和执行时长区间构造任务消息并投递到输入 topic。 |
+| `task_router` | 任务分流 | 从 Kafka 读取任务，解析后按类型映射到 Celery 队列，实现“消息总线 → 执行队列”桥接。 |
+| `task_worker_query` | 执行 query 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=query`，仅消费 `query_queue`。 |
+| `task_worker_write` | 执行 write 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=write`，仅消费 `write_queue`。 |
+| `task_worker_delete` | 执行 delete 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=delete`，仅消费 `delete_queue`。 |
+| `task_result_proxy` | 聚合执行结果并回传 Kafka | 监听 Celery `task-succeeded`/`task-failed` 事件，构造统一结果载荷并发布到 `task_result`。 |
+| `task_result_viewer` | 展示结果流 | 以独立消费组订阅 `task_result`，逐条打印结果，实现最小可观测闭环。 |
 
-    %% 7. 结果通知：下游解耦
-    F->>I: 发布结果通知（task_id+status+结果/错误）
-    I->>J: 广播通知到结果消费端
-    J->>J: 解析并打印结果（模拟下游业务处理）
+## 如何新增服务并注册
 
-    %% 8. 监控层：状态查询
-    A->>H: 调用get_task_status_stat查询状态统计
-    H->>A: 返回QPS/队列长度/任务状态分布
-    A->>A: 聚合数据并展示（/status接口）
+项目通过 `ServiceManager` 注册服务，并在 `main.py` 中按 `SERVICE_ROLE` 启动对应服务。新增服务建议按以下步骤进行：
+
+### 1) 新建服务模块并注册
+
+在 `services/` 下新增模块，例如 `services/metrics_exporter.py`，使用装饰器注册：
+
+```python
+from services.registry import ServiceManager
+
+
+@ServiceManager.register_service(service_name="task_metrics_exporter")
+def run_metrics_exporter() -> None:
+    while True:
+        ...
 ```
 
-任务状态流转
+注册名就是运行时可发现的服务名，后续会被 `SERVICE_ROLE` 解析并调用。
 
-```mermaid
-stateDiagram-v2
-    %% 样式定义（严格遵循官方语法）
-    classDef coreState fill:#E8F4FD,stroke:#2196F3,stroke-width:2px
-    classDef errorState fill:#FFEBEE,stroke:#F44336,stroke-width:2px
-    classDef successState fill:#E8F5E8,stroke:#4CAF50,stroke-width:2px
-    classDef middleState fill:#FFF3E0,stroke:#FF9800,stroke-width:2px
+### 2) 在 main.py 中加入模块导入
 
-    %% 状态流转（描述仅保留核心语义，无任何特殊字符）
-    [*] --> 未提交 : 生成Mock发布源任务
-    未提交 : 任务生成未推送接入层
-    未提交 --> 提交校验中 : 推送至接入层
-    提交校验中 : 接入层校验任务参数
-    提交校验中 --> [*] : 参数无效，丢弃
-    提交校验中 --> PENDING : 参数合法，写入状态库
-    PENDING:::coreState : 核心初始状态
-    PENDING --> 队列缓冲中 : 推送至Celery Redis队列
-    队列缓冲中:::middleState : 任务存入FIFO队列
-    队列缓冲中 --> 执行中 : Worker拉取任务
-    执行中:::middleState : Worker执行Mock查询
-    执行中 --> SUCCESS:::successState : 查询成功
-    SUCCESS : 执行成功，更新状态库
-    执行中 --> 重试中 : 查询失败，可重试
-    重试中:::middleState : Celery触发重试逻辑
-    重试中 --> 队列缓冲中 : 重新入队等待消费
-    执行中 --> FAILED:::errorState : 查询失败，重试耗尽
-    FAILED : 执行失败，更新状态库
+更新 `SERVICE_MODULES`，确保启动时会导入你的模块并完成注册：
 
-    %% 所有备注仅用纯自然语言，移除所有特殊符号和HTML标签
-    note right of 未提交: Mock按QPS控制推送速率
-    note right of 提交校验中: 检查task_id和task_type不为空
-    note right of PENDING: 分流层标记status为pending（SQLite：task_id加status等于pending） 规则：先标记PENDING再推Celery 即使队列推送失败，状态库有记录可重试
-    note right of 队列缓冲中: Redis按FIFO缓冲，削峰填谷
-    note right of 执行中: Worker反序列化任务，调用数据基座Mock 随机耗时0.01至0.1秒，1%失败概率 规则：仅Worker执行完成后更新最终状态 避免Celery下发时更新导致一致性问题
-    note right of SUCCESS: SQLite：pending改为success 写入执行结果 最终状态
-    note right of 重试中: 等待2秒后推回原队列（最大重试次数为2）
-    note right of FAILED: SQLite：pending改为failed 记录错误信息 最终状态
+```python
+SERVICE_MODULES = (
+    "services.task_generator",
+    "services.router",
+    "services.worker",
+    "services.result_proxy",
+    "services.result_display",
+    "services.metrics_exporter",
+)
+```
+
+如果不加入这里，模块不会被导入，服务也不会进入注册表。
+
+### 3) 按需补充角色别名
+
+如果希望支持简写角色名，可在 `ROLE_ALIASES` 增加映射：
+
+```python
+ROLE_ALIASES = {
+    "metrics_exporter": "task_metrics_exporter",
+    "task_metrics_exporter": "task_metrics_exporter",
+}
+```
+
+### 4) 在 Docker Compose 中新增容器
+
+新增一个服务容器并设置 `SERVICE_ROLE`：
+
+```yaml
+task_metrics_exporter:
+  <<: *app-base
+  environment:
+    SERVICE_ROLE: task_metrics_exporter
+```
+
+容器启动后会执行 `python main.py`，主程序读取 `SERVICE_ROLE` 并运行已注册服务。
+
+### 5) Celery 类型服务的特殊行为
+
+如果注册函数返回的是 `Celery` 实例，主程序会自动调用 worker 启动逻辑；如果返回 `None` 或普通对象，则按普通函数服务运行。
+
+### 6) 验证新增服务是否生效
+
+```bash
+docker compose up -d --build task_metrics_exporter
+docker compose logs --tail=100 task_metrics_exporter
+```
+
+看到 `start service role:` 且无 `unknown SERVICE_ROLE` 报错，说明注册与启动链路正常。
+
+## 服务角色
+
+| SERVICE_ROLE | 说明 |
+| --- | --- |
+| `task_gen_and_push` | 按 `QPS` 持续生成随机任务并写入 `task_input` |
+| `task_router` | 消费 `task_input`，按任务类型路由到 Celery 队列 |
+| `task_worker` | Celery Worker 执行任务，按 `CELERY_WORKER_TASK_TYPE` 绑定队列 |
+| `task_result_proxy` | 监听 Celery 成功/失败事件，整理后写入 `task_result` |
+| `task_result_viewer` | 消费 `task_result` 并逐行打印 JSON |
+
+## 关键行为说明
+
+- 任务类型：`query`、`write`、`delete`。
+- 执行结果：
+  - `if_success=false` 时会抛出 `RuntimeError`。
+  - `execution_time > TIMEOUT_THRESHOLD` 时会抛出 `TimeoutError`。
+- 失败日志是模拟业务行为的一部分，不代表链路中断。
+
+## 快速开始
+
+### 1) 准备环境
+
+- Docker / Docker Compose
+- Python 3.14（仅本地直接运行时需要）
+
+### 2) 配置
+
+复制 `.env.example` 为 `.env`，默认参数可直接启动。
+
+### 3) 启动
+
+```bash
+docker compose up -d --build
+```
+
+### 4) 查看运行状态
+
+```bash
+docker compose ps
+docker compose logs --tail=100 task_router task_result_proxy task_result_viewer
+```
+
+## 初步验收命令
+
+### 1) 检查输入 topic 生产
+
+```bash
+docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic task_input
+```
+
+### 2) 检查路由消费组
+
+```bash
+docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group task_flow_demo
+```
+
+### 3) 检查结果 topic 产出
+
+```bash
+docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic task_result
+```
+
+### 4) 查看结果消费输出
+
+```bash
+docker compose logs --tail=30 task_result_viewer
+```
+
+## 单节点 Kafka 说明
+
+本项目在 `docker-compose.yaml` 中显式设置了单节点所需参数，避免消费组协调和内部主题副本问题：
+
+- `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`
+- `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`
+- `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`
+- `KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0`
+
+## 环境变量
+
+核心变量（完整见 `.env.example`）：
+
+- `QPS`：任务生成速率。
+- `FAIL_RATE`：任务失败概率（生成阶段决定 `if_success`）。
+- `MIN_TIME` / `MAX_TIME`：随机执行时长范围（秒）。
+- `TIMEOUT_THRESHOLD`：超时阈值（秒）。
+- `KAFKA_BOOTSTRAP_SERVERS`：Kafka 地址。
+- `KAFKA_TASK_TOPIC` / `KAFKA_RESULT_TOPIC`：输入/结果主题。
+- `REDIS_URL`：Celery Broker/Backend 连接地址。
+- `CELERY_WORKER_TASK_TYPE`：worker 绑定类型（`query`/`write`/`delete`）。
+
+## 停止与清理
+
+```bash
+docker compose down
+docker compose down -v
 ```
