@@ -18,7 +18,7 @@ from services.registry import ServiceManager
 
 def _build_celery_app() -> Celery:
     return Celery(
-        "task_flow_result_receiver",
+        "task_flow_result_proxy",
         broker=redis_config.URL,
         backend=redis_config.URL,
     )
@@ -64,7 +64,7 @@ def _build_payload(app: Celery, event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@ServiceManager.register_service(service_name="task_result_receiver")
+@ServiceManager.register_service(service_name="task_result_proxy")
 def consume_celery_results(
     celery_app: Celery | None = None,
     kafka_producer: Producer | None = None,

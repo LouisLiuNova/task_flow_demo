@@ -22,7 +22,6 @@ ROLE_ALIASES = {
     "task_router": "task_router",
     "worker": "task_worker",
     "task_worker": "task_worker",
-    "result_receiver": "task_result_proxy",
     "result_proxy": "task_result_proxy",
     "task_result_proxy": "task_result_proxy",
     "result_viewer": "task_result_viewer",
