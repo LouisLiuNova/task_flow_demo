@@ -26,10 +26,14 @@ click-repl==0.3.0
     # via celery
 confluent-kafka==2.13.2
     # via task-flow-demo (pyproject.toml)
+greenlet==3.3.2
+    # via sqlalchemy
 idna==3.11
     # via requests
 kombu==5.6.2
-    # via celery
+    # via
+    #   task-flow-demo (pyproject.toml)
+    #   celery
 loguru==0.7.3
     # via task-flow-demo (pyproject.toml)
 packaging==26.0
@@ -50,10 +54,13 @@ requests==2.32.5
     # via task-flow-demo (pyproject.toml)
 six==1.17.0
     # via python-dateutil
+sqlalchemy==2.0.48
+    # via task-flow-demo (pyproject.toml)
 typing-extensions==4.15.0
     # via
     #   pydantic
     #   pydantic-core
+    #   sqlalchemy
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic

@@ -14,7 +14,8 @@ load_dotenv(override=True)
 
 @dataclass
 class DatabaseConfig:
-    url: str = os.getenv("DATABASE_URL")
+    url: str = os.getenv("DATABASE_URL", "sqlite:////app/data/task_state.db")
+    echo: bool = os.getenv("DB_ECHO", "false").lower() == "true"
 
 
 @dataclass

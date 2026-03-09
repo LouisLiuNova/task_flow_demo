@@ -4,6 +4,7 @@ Celery worker 任务执行入口，按环境变量选择队列并模拟任务执
 
 from __future__ import annotations
 
+import socket
 import time
 from typing import Any
 
@@ -12,6 +13,7 @@ from kombu import Queue
 
 from common import logger
 from common.config import celery_config, task_config
+from common.db import TaskStateCRUD, init_tables, get_session
 from common.models.enums import TaskType
 from common.models.task import Task
 from services.registry import ServiceManager
@@ -65,10 +67,30 @@ def _parse_task(task_payload: Task | dict[str, Any]) -> Task:
     return Task.model_validate(task_payload)
 
 
+def _get_hostname() -> str:
+    """Get current worker hostname."""
+    return socket.gethostname()
+
+
 def _simulate_execution(task: Task) -> dict[str, Any]:
     """
     模拟任务执行，并根据配置判断成功或失败。
+    Updates task state in SQLite database.
     """
+    task_id = str(task.id)
+    hostname = _get_hostname()
+    
+    # Initialize database tables (in case not initialized)
+    init_tables()
+    
+    # Mark task as executing
+    try:
+        with get_session() as session:
+            TaskStateCRUD.mark_as_executing(session, task_id, hostname)
+            logger.debug("task marked as executing: id={}, worker={}", task_id, hostname)
+    except Exception as db_exc:
+        logger.error("failed to update task status to executing: {}", db_exc)
+    
     timeout_threshold = task_config.TIMEOUT_THRESHOLD
     execution_time = task.execution_time
     logger.info(
@@ -83,24 +105,51 @@ def _simulate_execution(task: Task) -> dict[str, Any]:
         logger.warning("task id={} execution_time < 0, normalized to 0", task.id)
     logger.info("task id={} start execution sleep {}s", task.id, sleep_time)
     time.sleep(sleep_time)
+    
     if execution_time > timeout_threshold:
         message = (
             f"task id={task.id} timeout: execution_time={execution_time}s "
             f"threshold={timeout_threshold}s"
         )
         logger.error(message)
+        # Mark task as timeout in database
+        try:
+            with get_session() as session:
+                TaskStateCRUD.mark_as_timeout(
+                    session, task_id, message, traceback=None
+                )
+        except Exception as db_exc:
+            logger.error("failed to update task status to timeout: {}", db_exc)
         raise TimeoutError(message)
+    
     if not task.if_success:
         message = f"task id={task.id} failed by if_success=false"
         logger.error(message)
+        # Mark task as failed in database
+        try:
+            with get_session() as session:
+                TaskStateCRUD.mark_as_failed(session, task_id, message, traceback=None)
+        except Exception as db_exc:
+            logger.error("failed to update task status to failed: {}", db_exc)
         raise RuntimeError(message)
-    logger.info("task id={} success", task.id)
-    return {
+    
+    result = {
         "task_id": str(task.id),
         "task_type": task.task_type,
         "execution_time": execution_time,
         "status": "success",
     }
+    logger.info("task id={} success", task.id)
+    
+    # Mark task as success in database
+    try:
+        with get_session() as session:
+            TaskStateCRUD.mark_as_success(session, task_id, result)
+            logger.debug("task marked as success: id={}", task_id)
+    except Exception as db_exc:
+        logger.error("failed to update task status to success: {}", db_exc)
+    
+    return result
 
 
 queue_name = _resolve_queue_name()

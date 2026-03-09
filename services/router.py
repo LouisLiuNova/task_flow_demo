@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from common import logger
 from common.config import kafka_config, redis_config
+from common.db import TaskStateCRUD, init_tables, get_session
 from common.models.enums import TaskType
 from common.models.task import Task
 from services.registry import ServiceManager
@@ -31,6 +32,9 @@ def consume_and_route_tasks(
     celery_app: Celery | None = None,
     topic: str | None = None,
 ) -> None:
+    # Initialize database tables
+    init_tables()
+    
     kafka_consumer = consumer or Consumer(
         {
             "bootstrap.servers": kafka_config.BOOTSTRAP_SERVERS,
@@ -57,11 +61,29 @@ def consume_and_route_tasks(
                 logger.error("invalid task payload: {}", exc)
                 kafka_consumer.commit(message=message, asynchronous=False)
                 continue
+            
+            # Create task state record in SQLite
+            try:
+                with get_session() as session:
+                    TaskStateCRUD.create_task_state(session, task.model_dump())
+                    logger.debug("task state created in db: id={}", task.id)
+            except Exception as db_exc:
+                logger.error("failed to create task state: {}", db_exc)
+            
             queue_name = _queue_for_task_type(task.task_type)
             task_name = _task_name_for_task_type(task.task_type)
             app.send_task(
                 task_name, kwargs={"task": task.model_dump()}, queue=queue_name
             )
+            
+            # Update task status to ROUTED after successful send
+            try:
+                with get_session() as session:
+                    TaskStateCRUD.mark_as_routed(session, str(task.id), queue_name)
+                    logger.debug("task marked as routed: id={}, queue={}", task.id, queue_name)
+            except Exception as db_exc:
+                logger.error("failed to update task status to routed: {}", db_exc)
+            
             kafka_consumer.commit(message=message, asynchronous=False)
     except KeyboardInterrupt:
         pass

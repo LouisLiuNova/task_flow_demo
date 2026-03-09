@@ -44,6 +44,8 @@ services:
     <<: *app-base
     environment:
       SERVICE_ROLE: task_router
+    volumes:
+      - sqlite_data:/app/data
 
   task_result_proxy:
     <<: *app-base
@@ -60,18 +62,25 @@ services:
     environment:
       SERVICE_ROLE: task_worker
       CELERY_WORKER_TASK_TYPE: query
+    volumes:
+      - sqlite_data:/app/data
 
   task_worker_write:
     <<: *app-base
     environment:
       SERVICE_ROLE: task_worker
       CELERY_WORKER_TASK_TYPE: write
+    volumes:
+      - sqlite_data:/app/data
 
   task_worker_delete:
     <<: *app-base
     environment:
       SERVICE_ROLE: task_worker
       CELERY_WORKER_TASK_TYPE: delete
+    volumes:
+      - sqlite_data:/app/data
 
 volumes:
   kafka_data:
+  sqlite_data:

@@ -2,7 +2,7 @@
 
 一个基于 Kafka + Celery + Redis 的任务流转演示项目。
 
-当前仓库实现的是容器化的"任务生成 → 路由 → Worker 执行 → 结果回传 → 结果展示"闭环，不包含 FastAPI 接口与 SQLite 状态库。
+当前仓库实现的是容器化的"任务生成 → 路由 → Worker 执行 → 结果回传 → 结果展示"闭环，并包含 SQLite 任务状态持久化。
 
 完整规划见 [ROADMAP.md](./ROADMAP.md)。
 
@@ -25,42 +25,83 @@ flowchart LR
         KOUT["Kafka: task_result"]
         REDIS["Redis"]
         CEVT["Celery Events/Backend"]
+        SQLITE["SQLite: task_state.db"]
     end
 
-    GEN -->|生产任务| KIN
-    ROUTER -->|消费任务| KIN
-    ROUTER -->|按类型投递| REDIS
+    GEN -->|生产任务 | KIN
+    ROUTER -->|消费任务 | KIN
+    ROUTER -->|按类型投递 | REDIS
+    ROUTER -->|记录状态 | SQLITE
     REDIS -->|query_queue| WQ
     REDIS -->|write_queue| WW
     REDIS -->|delete_queue| WD
-    WQ -->|任务事件| CEVT
-    WW -->|任务事件| CEVT
-    WD -->|任务事件| CEVT
-    RP -->|监听 Celery 事件| CEVT
-    RP -->|发布结果| KOUT
-    RV -->|消费并打印| KOUT
+    WQ -->|任务事件 | CEVT
+    WQ -->|更新状态 | SQLITE
+    WW -->|任务事件 | CEVT
+    WW -->|更新状态 | SQLITE
+    WD -->|任务事件 | CEVT
+    WD -->|更新状态 | SQLITE
+    RP -->|监听 Celery 事件 | CEVT
+    RP -->|发布结果 | KOUT
+    RV -->|消费并打印 | KOUT
 ```
 
 ## 系统原理说明
 
-系统采用事件驱动与异步解耦模型，将“任务生产、任务分发、任务执行、结果回传”拆分为独立职责：
+系统采用事件驱动与异步解耦模型，将"任务生产、任务分发、任务执行、结果回传"拆分为独立职责：
 
-1. 任务生成阶段  
+1. 任务生成阶段
    `task_gen_and_push` 按 `QPS` 生成随机任务（包含任务类型、执行时长、是否成功），写入 Kafka 输入主题 `task_input`。
-2. 路由分发阶段  
-   `task_router` 消费 `task_input`，校验任务结构后按 `task_type` 分发到 Celery 对应队列（`query_queue`/`write_queue`/`delete_queue`）。
-3. 执行阶段  
-   三个 `task_worker_*` 容器分别监听自己的队列并执行任务，执行结果由 Celery Backend 记录，执行事件通过 Celery Events 发出。
-4. 结果聚合阶段  
+2. 路由分发阶段
+   `task_router` 消费 `task_input`，校验任务结构后按 `task_type` 分发到 Celery 对应队列（`query_queue`/`write_queue`/`delete_queue`），**并在 SQLite 中创建任务状态记录**。
+3. 执行阶段
+   三个 `task_worker_*` 容器分别监听自己的队列并执行任务，执行结果由 Celery Backend 记录，执行事件通过 Celery Events 发出，**同时更新 SQLite 中的任务状态**。
+4. 结果聚合阶段
    `task_result_proxy` 订阅 Celery 成功/失败事件，补齐任务结果信息并写回 Kafka 输出主题 `task_result`。
-5. 结果消费阶段  
+5. 结果消费阶段
    `task_result_viewer` 消费 `task_result`，将结果以 JSON 行输出，便于下游系统接入或日志采集。
 
 该模型的核心原理是：
 
 - Kafka 负责跨服务消息解耦与削峰，降低生产端和消费端耦合。
 - Celery + Redis 负责任务执行调度与队列隔离，让不同任务类型可独立扩缩。
+- **SQLite 负责任务状态持久化，记录任务从创建到完成的全生命周期状态流转**。
 - 结果回传链路独立于执行链路，失败与成功都可统一聚合和观察。
+
+## SQLite 任务状态表
+
+### 表结构
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| id | VARCHAR(36) | 任务 UUID（主键） |
+| task_type | VARCHAR(20) | 任务类型（query/write/delete） |
+| task_name | VARCHAR(255) | 任务名称 |
+| if_success | BOOLEAN | 模拟是否成功 |
+| execution_time | INTEGER | 执行时长（秒） |
+| status | VARCHAR(20) | 当前状态（pending/routed/executing/success/failed/timeout） |
+| queue_name | VARCHAR(50) | 路由目标队列 |
+| worker_hostname | VARCHAR(255) | 执行 worker 主机名 |
+| result | VARCHAR(1024) | JSON 格式执行结果 |
+| exception | VARCHAR(1024) | 异常信息 |
+| traceback | VARCHAR(4096) | 堆栈跟踪 |
+| created_at | DATETIME | 创建时间 |
+| updated_at | DATETIME | 更新时间 |
+
+### 任务状态流转
+
+```
+PENDING → ROUTED → EXECUTING → SUCCESS/FAILED/TIMEOUT
+```
+
+| 状态 | 说明 | 触发时机 |
+|------|------|----------|
+| PENDING | 待处理 | 任务刚被创建 |
+| ROUTED | 已路由 | 任务已成功发送到 Celery 队列 |
+| EXECUTING | 执行中 | Worker 开始处理任务 |
+| SUCCESS | 成功 | 任务执行成功 |
+| FAILED | 失败 | 任务执行失败（if_success=false） |
+| TIMEOUT | 超时 | 任务执行超时（execution_time > TIMEOUT_THRESHOLD） |
 
 ## Docker 容器功能与原理
 
@@ -69,10 +110,10 @@ flowchart LR
 | `kafka` | 输入/输出消息总线 | 使用 topic 存储任务与结果；生产者写入 `task_input`/`task_result`，消费者按消费组拉取，实现发布订阅与位点管理。 |
 | `redis` | Celery Broker 与 Backend | Broker 负责队列缓存和投递，Backend 保存任务执行结果，供结果代理服务回查。 |
 | `task_gen_and_push` | 持续生成任务并推送 Kafka | 按 `QPS` 控制发送节奏，按 `FAIL_RATE` 和执行时长区间构造任务消息并投递到输入 topic。 |
-| `task_router` | 任务分流 | 从 Kafka 读取任务，解析后按类型映射到 Celery 队列，实现“消息总线 → 执行队列”桥接。 |
-| `task_worker_query` | 执行 query 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=query`，仅消费 `query_queue`。 |
-| `task_worker_write` | 执行 write 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=write`，仅消费 `write_queue`。 |
-| `task_worker_delete` | 执行 delete 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=delete`，仅消费 `delete_queue`。 |
+| `task_router` | 任务分流 + 状态持久化 | 从 Kafka 读取任务，解析后按类型映射到 Celery 队列，**并在 SQLite 中创建任务状态记录**。 |
+| `task_worker_query` | 执行 query 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=query`，仅消费 `query_queue`，**执行完成后更新 SQLite 状态**。 |
+| `task_worker_write` | 执行 write 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=write`，仅消费 `write_queue`，**执行完成后更新 SQLite 状态**。 |
+| `task_worker_delete` | 执行 delete 任务 | 基于 `task_worker` 角色启动，`CELERY_WORKER_TASK_TYPE=delete`，仅消费 `delete_queue`，**执行完成后更新 SQLite 状态**。 |
 | `task_result_proxy` | 聚合执行结果并回传 Kafka | 监听 Celery `task-succeeded`/`task-failed` 事件，构造统一结果载荷并发布到 `task_result`。 |
 | `task_result_viewer` | 展示结果流 | 以独立消费组订阅 `task_result`，逐条打印结果，实现最小可观测闭环。 |
 
@@ -155,8 +196,8 @@ docker compose logs --tail=100 task_metrics_exporter
 | SERVICE_ROLE | 说明 |
 | --- | --- |
 | `task_gen_and_push` | 按 `QPS` 持续生成随机任务并写入 `task_input` |
-| `task_router` | 消费 `task_input`，按任务类型路由到 Celery 队列 |
-| `task_worker` | Celery Worker 执行任务，按 `CELERY_WORKER_TASK_TYPE` 绑定队列 |
+| `task_router` | 消费 `task_input`，按任务类型路由到 Celery 队列，**并创建 SQLite 状态记录** |
+| `task_worker` | Celery Worker 执行任务，按 `CELERY_WORKER_TASK_TYPE` 绑定队列，**并更新 SQLite 状态** |
 | `task_result_proxy` | 监听 Celery 成功/失败事件，整理后写入 `task_result` |
 | `task_result_viewer` | 消费 `task_result` 并逐行打印 JSON |
 
@@ -167,6 +208,7 @@ docker compose logs --tail=100 task_metrics_exporter
   - `if_success=false` 时会抛出 `RuntimeError`。
   - `execution_time > TIMEOUT_THRESHOLD` 时会抛出 `TimeoutError`。
 - 失败日志是模拟业务行为的一部分，不代表链路中断。
+- **所有任务状态变更都会同步到 SQLite 数据库**。
 
 ## 快速开始
 
@@ -190,6 +232,16 @@ docker compose up -d --build
 ```bash
 docker compose ps
 docker compose logs --tail=100 task_router task_result_proxy task_result_viewer
+```
+
+### 5) 查询 SQLite 任务状态
+
+```bash
+# 进入 task_router 容器
+docker compose exec task_router sh
+
+# 使用 sqlite3 查询任务状态
+sqlite3 /app/data/task_state.db "SELECT id, task_type, status, queue_name, created_at FROM task_states ORDER BY created_at DESC LIMIT 10;"
 ```
 
 ## 初步验收命令
@@ -218,6 +270,16 @@ docker compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-ser
 docker compose logs --tail=30 task_result_viewer
 ```
 
+### 5) 查询 SQLite 任务状态
+
+```bash
+# 查看任务状态统计
+docker compose exec task_router sqlite3 /app/data/task_state.db "SELECT status, COUNT(*) FROM task_states GROUP BY status;"
+
+# 查看最近 10 条任务记录
+docker compose exec task_router sqlite3 /app/data/task_state.db "SELECT id, task_type, status, queue_name, created_at FROM task_states ORDER BY created_at DESC LIMIT 10;"
+```
+
 ## 单节点 Kafka 说明
 
 本项目在 `docker-compose.yaml` 中显式设置了单节点所需参数，避免消费组协调和内部主题副本问题：
@@ -239,6 +301,8 @@ docker compose logs --tail=30 task_result_viewer
 - `KAFKA_TASK_TOPIC` / `KAFKA_RESULT_TOPIC`：输入/结果主题。
 - `REDIS_URL`：Celery Broker/Backend 连接地址。
 - `CELERY_WORKER_TASK_TYPE`：worker 绑定类型（`query`/`write`/`delete`）。
+- **`DATABASE_URL`：SQLite 数据库连接地址（默认：`sqlite:////app/data/task_state.db`）**。
+- **`DB_ECHO`：是否开启 SQL 日志（默认：`false`）**。
 
 ## 停止与清理
 
@@ -256,7 +320,7 @@ docker compose down -v
 
 ### 状态与结果持久化
 
-- 引入任务状态库（例如 SQLite）记录 `pending/success/failed`。
+- ~~引入任务状态库（例如 SQLite）记录 `pending/success/failed`~~ ✅ 已实现
 - 引入结果库保存执行结果与错误详情。
 
 ### 执行可靠性
