@@ -9,41 +9,66 @@
 ## 当前实现架构
 
 ```mermaid
-flowchart LR
-    subgraph Runtime["运行容器"]
-        GEN["task_gen_and_push"]
-        ROUTER["task_router"]
-        WQ["task_worker_query"]
-        WW["task_worker_write"]
-        WD["task_worker_delete"]
-        RP["task_result_proxy"]
-        RV["task_result_viewer"]
+flowchart TB
+    %% 样式定义
+    classDef service fill:#e1f5ff,stroke:#0077b6,stroke-width:2px
+    classDef infra fill:#fff4e6,stroke:#e67e22,stroke-width:2px
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
+
+    subgraph Runtime["🖥️ 运行容器"]
+        direction TB
+        GEN["📤 task_gen_and_push<br/>任务生成器"]:::service
+        ROUTER["🔀 task_router<br/>任务路由器"]:::service
+        
+        subgraph Workers["Worker 集群"]
+            direction LR
+            WQ["🔍 task_worker_query"]:::service
+            WW["✏️ task_worker_write"]:::service
+            WD["🗑️ task_worker_delete"]:::service
+        end
+        
+        RP["📡 task_result_proxy<br/>结果代理"]:::service
+        RV["📺 task_result_viewer<br/>结果查看器"]:::service
     end
 
-    subgraph Infra["基础设施"]
-        KIN["Kafka: task_input"]
-        KOUT["Kafka: task_result"]
-        REDIS["Redis"]
-        CEVT["Celery Events/Backend"]
-        SQLITE["SQLite: task_state.db"]
+    subgraph Infra["🏗️ 基础设施"]
+        direction TB
+        KIN[("📥 Kafka<br/>task_input")]:::infra
+        KOUT[("📤 Kafka<br/>task_result")]:::infra
+        REDIS[("💾 Redis<br/>Broker/Backend")]:::infra
+        CEVT["⚡ Celery Events"]:::infra
     end
 
-    GEN -->|生产任务 | KIN
-    ROUTER -->|消费任务 | KIN
-    ROUTER -->|按类型投递 | REDIS
-    ROUTER -->|记录状态 | SQLITE
-    REDIS -->|query_queue| WQ
-    REDIS -->|write_queue| WW
-    REDIS -->|delete_queue| WD
-    WQ -->|任务事件 | CEVT
-    WQ -->|更新状态 | SQLITE
-    WW -->|任务事件 | CEVT
-    WW -->|更新状态 | SQLITE
-    WD -->|任务事件 | CEVT
-    WD -->|更新状态 | SQLITE
-    RP -->|监听 Celery 事件 | CEVT
-    RP -->|发布结果 | KOUT
-    RV -->|消费并打印 | KOUT
+    subgraph Storage["💿 持久化存储"]
+        SQLITE[("📋 SQLite<br/>task_state.db")]:::storage
+    end
+
+    %% 数据流 - 主流程
+    GEN -->|"① 生产任务"| KIN
+    KIN -->|"② 消费任务"| ROUTER
+    ROUTER -->|"③ 路由分发"| REDIS
+    
+    REDIS -->|"query_queue"| WQ
+    REDIS -->|"write_queue"| WW
+    REDIS -->|"delete_queue"| WD
+    
+    WQ -->|"④ 任务事件"| CEVT
+    WW -->|"④ 任务事件"| CEVT
+    WD -->|"④ 任务事件"| CEVT
+    
+    CEVT -->|"⑤ 监听事件"| RP
+    RP -->|"⑥ 发布结果"| KOUT
+    KOUT -->|"⑦ 消费展示"| RV
+
+    %% 状态持久化流
+    ROUTER -.->|"创建记录"| SQLITE
+    WQ -.->|"更新状态"| SQLITE
+    WW -.->|"更新状态"| SQLITE
+    WD -.->|"更新状态"| SQLITE
+
+    %% 连接线样式
+    linkStyle 0,1,2,3,4,5,6,7,8,9 stroke:#333,stroke-width:2px
+    linkStyle 10,11,12,13 stroke:#2e7d32,stroke-width:1.5px,stroke-dasharray:5 5
 ```
 
 ## 系统原理说明
