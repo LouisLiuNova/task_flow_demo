@@ -2,9 +2,9 @@
 
 一个基于 Kafka + Celery + Redis 的任务流转演示项目。
 
-当前仓库实现的是容器化的“任务生成 → 路由 → Worker 执行 → 结果回传 → 结果展示”闭环，不包含 FastAPI 接口与 SQLite 状态库。
+当前仓库实现的是容器化的"任务生成 → 路由 → Worker 执行 → 结果回传 → 结果展示"闭环，不包含 FastAPI 接口与 SQLite 状态库。
 
-未实现能力和后续计划已迁移到 [ROADMAP.md](./ROADMAP.md)。
+完整规划见 [ROADMAP.md](./ROADMAP.md)。
 
 ## 当前实现架构
 
@@ -246,3 +246,25 @@ docker compose logs --tail=30 task_result_viewer
 docker compose down
 docker compose down -v
 ```
+
+## 规划中的能力
+
+### 接入与配置层
+
+- 增加 FastAPI 配置与监控接口（如 QPS 动态调节、状态查询）。
+- 增加统一任务接入层与参数校验入口。
+
+### 状态与结果持久化
+
+- 引入任务状态库（例如 SQLite）记录 `pending/success/failed`。
+- 引入结果库保存执行结果与错误详情。
+
+### 执行可靠性
+
+- 基于 Celery 增加可配置重试策略（重试次数、回退策略）。
+- 增加死信/补偿机制，处理长期失败任务。
+
+### 可观测性与运维
+
+- 增加结构化指标输出（吞吐、失败率、队列积压）。
+- 提供一键健康检查与链路诊断脚本。
